@@ -75,6 +75,7 @@ export const incrementRetryCount = async (
   redis: Redis,
   transactionId: string
 ): Promise<void> => {
+  // TODO update timestamp?
   const key = `txn:${transactionId}`;
   logger.debug('Incrementing retries fortransaction Key: %s', key);
   try {

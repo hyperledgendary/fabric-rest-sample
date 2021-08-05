@@ -2,34 +2,28 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Request } from 'express';
 import {
-  Contract,
+  BlockEvent, BlockListener, Contract,
   DefaultEventHandlerStrategies,
   DefaultQueryHandlerStrategies,
   Gateway,
-  GatewayOptions,
-  Wallets,
-  Network,
-  BlockListener,
-  BlockEvent,
-  TransactionEvent,
+  GatewayOptions, Network, TransactionEvent, Wallets
 } from 'fabric-network';
-import { Request } from 'express';
+import fabricProtos from 'fabric-protos';
 import { Redis } from 'ioredis';
 import * as config from './config';
-import { logger } from './logger';
-import {
-  storeTransactionDetails,
-  clearTransactionDetails,
-  incrementRetryCount,
-} from './redis';
 import {
   AssetExistsError,
   AssetNotFoundError,
   TransactionError,
-  TransactionNotFoundError,
+  TransactionNotFoundError
 } from './errors';
-import fabproto6 from 'fabric-protos';
+import { logger } from './logger';
+import {
+  clearTransactionDetails,
+  incrementRetryCount, storeTransactionDetails
+} from './redis';
 
 export const getNetwork = async (gateway: Gateway): Promise<Network> => {
   const network = await gateway.getNetwork(config.channelName);
@@ -64,6 +58,15 @@ const FabricDataMapper: { [key: string]: FabricConfigType } = {
   [config.identityNameOrg1]: ORG1_CONFIG,
   [config.identityNameOrg2]: ORG2_CONFIG,
 };
+
+// TODO is this a reasonable set of errors for sample retry logic?
+const retryableErrors = [
+  'MVCC_READ_CONFLICT',
+  'PHANTOM_READ_CONFLICT',
+  'ENDORSEMENT_POLICY_FAILURE',
+  'CHAINCODE_VERSION_CONFLICT',
+  'EXPIRED_CHAINCODE',
+];
 
 export const getGateway = async (org: string): Promise<Gateway> => {
   const fabricConfig = FabricDataMapper[org];
@@ -196,6 +199,7 @@ export const submitTransaction = async (
     // TODO will this always catch endorsement errors or can they
     // arrive later?
     await clearTransactionDetails(redis, txnId);
+
     throw handleError(txnId, err);
   }
 
@@ -275,11 +279,7 @@ export const retryTransaction = async (
     await transaction.submit(...args);
     await clearTransactionDetails(redis, transactionId);
   } catch (err) {
-    if (isDuplicateTransaction(err)) {
-      logger.warn('Transaction %s has already been committed', transactionId);
-      await clearTransactionDetails(redis, transactionId);
-    } else {
-      // TODO check for retry limit and update timestamp
+    if (isRetryableError(err)) {
       logger.warn(
         err,
         'Retry %d failed for transaction %s',
@@ -287,24 +287,35 @@ export const retryTransaction = async (
         transactionId
       );
       await incrementRetryCount(redis, transactionId);
+    } else {
+      logger.err(
+        err,
+        'Retry %d failed with a fatal error for transaction %s',
+        savedTransaction.retries,
+        transactionId
+      );
+      await clearTransactionDetails(redis, transactionId);
     }
   }
 };
 
-const isDuplicateTransaction = (error: {
+// This is horrible but checking error message strings seems like the only option!
+// TODO find out if there is anything in the error string to make the match more specific
+const isRetryableError = (error: {
   errors: { endorsements: { details: string }[] }[];
 }) => {
-  // TODO this is horrible! Isn't it possible to check for TxValidationCode DUPLICATE_TXID somehow?
   try {
-    const isDuplicateTxn = error?.errors?.some((err) =>
-      err?.endorsements?.some((endorsement) =>
-        endorsement?.details?.startsWith('duplicate transaction found')
-      )
+    const isRetryable = error?.errors?.some((err) =>
+      err?.endorsements?.some((endorsement) => {
+        return retryableErrors.some((re) =>
+          endorsement?.details?.includes(re)
+        )
+      })
     );
 
-    return isDuplicateTxn;
+    return isRetryable;
   } catch (err) {
-    logger.warn(err, 'Error checking for duplicate transaction');
+    logger.warn(err, 'Error checking for retriable transaction error');
   }
 
   return false;
@@ -335,7 +346,7 @@ export const getChainInfo = async (qscc: Contract): Promise<boolean> => {
       'GetChainInfo',
       config.channelName
     );
-    const info = fabproto6.common.BlockchainInfo.decode(data);
+    const info = fabricProtos.common.BlockchainInfo.decode(data);
     const blockHeight = info.height.toString();
     logger.info('Current block height: %s', blockHeight);
     return true;
