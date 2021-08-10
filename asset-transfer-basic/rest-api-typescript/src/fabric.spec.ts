@@ -2,8 +2,7 @@ import { retryTransaction, getGateway } from './fabric';
 import { getMockedNetwork } from './__mocks__/fabric-network';
 import * as config from './config';
 
-import IORedis from './__mocks__/IORedis';
-import { Redis } from 'ioredis';
+import IORedis, { Redis } from 'ioredis';
 import { Contract } from 'fabric-network';
 
 jest.mock('./config');
